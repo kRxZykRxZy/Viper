@@ -1,4 +1,3 @@
-// pure VPR std math module delegating to host.math
 export function sin(x): return host.math.sin(x)
 export function sqrt(x): return host.math.sqrt(x)
 export function factorial(n): return host.math.factorial(n)

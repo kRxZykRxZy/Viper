@@ -110,8 +110,89 @@ export function createHost() {
     };
 
     host.ai = {
-        run: async (name, url, prompt) => { return `coming soon`; },
-        run_model: async (name, url, model, prompt) => { return "coming soon"; }
+        run: async (name, url, prompt) => {
+            const provider = (name || '').toLowerCase();
+            if (provider === 'openai') {
+                const apiKey = Deno.env.get('OPENAI_API_KEY');
+                if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
+                const body = {
+                    model: url,
+                    messages: [{ role: 'user', content: prompt }]
+                };
+                const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                    body: JSON.stringify(body)
+                });
+                if (!res.ok) throw new Error('OpenAI request failed: ' + res.status);
+                const j = await res.json();
+                return j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message.content : '';
+            }
+            if (provider === 'ollama') {
+                const endpoints = ['/api/generate','/generate','/v1/generate','/completions','/v1/completions'];
+                for (const ep of endpoints) {
+                    try {
+                        const full = url.replace(/\/$/, '') + ep;
+                        const res = await fetch(full, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ prompt })
+                        });
+                        if (!res.ok) continue;
+                        const txt = await res.text();
+                        try { const j = JSON.parse(txt); return j && (j.output || j.result || JSON.stringify(j)); } catch (_) { return txt; }
+                    } catch (e) {
+                        // try next
+                    }
+                }
+                throw new Error('Unable to call Ollama at ' + url);
+            }
+            const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) });
+            if (!res.ok) throw new Error('AI host request failed: ' + res.status);
+            return await res.text();
+        },
+
+        run_model: async (name, url, model, prompt) => {
+            const provider = (name || '').toLowerCase();
+            if (provider === 'openai') {
+                const apiKey = Deno.env.get('OPENAI_API_KEY');
+                if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
+                const body = {
+                    model: model,
+                    messages: [{ role: 'user', content: prompt }]
+                };
+                const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                    body: JSON.stringify(body)
+                });
+                if (!res.ok) throw new Error('OpenAI request failed: ' + res.status);
+                const j = await res.json();
+                return j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message.content : '';
+            }
+            if (provider === 'ollama') {
+                const endpoints = ['/api/generate','/generate','/v1/generate','/completions','/v1/completions'];
+                for (const ep of endpoints) {
+                    try {
+                        const full = url.replace(/\/$/, '') + ep;
+                        const res = await fetch(full, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ model, prompt })
+                        });
+                        if (!res.ok) continue;
+                        const txt = await res.text();
+                        try { const j = JSON.parse(txt); return j && (j.output || j.result || JSON.stringify(j)); } catch (_) { return txt; }
+                    } catch (e) {
+                        // try next
+                    }
+                }
+                throw new Error('Unable to call Ollama at ' + url + ' with model ' + model);
+            }
+            const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt }) });
+            if (!res.ok) throw new Error('AI host request failed: ' + res.status);
+            return await res.text();
+        }
     };
 
     // Minimal FFI helpers for loading native shared libraries compiled from C/C++.
@@ -226,6 +307,99 @@ export function createHost() {
             }
         }
     };
+
+    host.gpu = {
+        isSupported: () => !!(globalThis.navigator && navigator.gpu),
+
+        requestDevice: async (opts = {}) => {
+            if (!globalThis.navigator || !navigator.gpu) throw new Error('WebGPU not supported');
+            const adapter = await navigator.gpu.requestAdapter(opts.adapterOptions || {});
+            if (!adapter) throw new Error('Failed to get GPU adapter');
+            const device = await adapter.requestDevice(opts.deviceDescriptor || {});
+            return device;
+        },
+
+        createBuffer: (device, data, usage = (GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC)) => {
+            const arr = (data instanceof ArrayBuffer) ? new Uint8Array(data) : (ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data));
+            const buf = device.createBuffer({ size: arr.byteLength, usage, mappedAtCreation: true });
+            const mapped = new Uint8Array(buf.getMappedRange());
+            mapped.set(arr);
+            buf.unmap();
+            return buf;
+        },
+
+        readBuffer: async (device, buffer, size) => {
+            const readBuf = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            const enc = device.createCommandEncoder();
+            enc.copyBufferToBuffer(buffer, 0, readBuf, 0, size);
+            device.queue.submit([enc.finish()]);
+            await readBuf.mapAsync(GPUMapMode.READ);
+            const out = new Uint8Array(readBuf.getMappedRange()).slice();
+            readBuf.unmap();
+            return out;
+        },
+
+        // run a compute shader. inputs/outputs may be TypedArrays or GPUBuffer objects.
+        run: async (shaderCode, inputBuffers = {}, outputBuffers = {}, opts = {}) => {
+            const device = opts.device || await host.gpu.requestDevice();
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            const bindGroupLayoutEntries = [];
+            const bindGroupEntries = [];
+            const createdBuffers = [];
+            let index = 0;
+
+            const prepare = (obj, type) => {
+                for (const [name, buf] of Object.entries(obj || {})) {
+                    let gpuBuf = buf;
+                    if (!(buf && buf.constructor && buf.constructor.name && buf.constructor.name.includes('GPUBuffer'))) {
+                        // assume TypedArray or ArrayBuffer
+                        gpuBuf = host.gpu.createBuffer(device, buf, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
+                        createdBuffers.push({ name, buffer: gpuBuf, size: (ArrayBuffer.isView(buf) ? buf.byteLength : buf.byteLength || buf.length) });
+                    }
+                    const entry = { binding: index, visibility: GPUShaderStage.COMPUTE, buffer: { type: type === 'input' ? 'read-only-storage' : 'storage' } };
+                    bindGroupLayoutEntries.push(entry);
+                    bindGroupEntries.push({ binding: index, resource: { buffer: gpuBuf } });
+                    index++;
+                }
+            };
+
+            prepare(inputBuffers, 'input');
+            prepare(outputBuffers, 'output');
+
+            const bindGroupLayout = device.createBindGroupLayout({ entries: bindGroupLayoutEntries });
+            const pipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }), compute: { module: shaderModule, entryPoint: opts.entryPoint || 'main' } });
+            const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: bindGroupEntries });
+
+            const commandEncoder = device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(pipeline);
+            passEncoder.setBindGroup(0, bindGroup);
+            const wx = opts.workgroupsX || 1;
+            const wy = opts.workgroupsY || 1;
+            const wz = opts.workgroupsZ || 1;
+            passEncoder.dispatchWorkgroups(wx, wy, wz);
+            passEncoder.end();
+            device.queue.submit([commandEncoder.finish()]);
+            if (device.queue.onSubmittedWorkDone) await device.queue.onSubmittedWorkDone();
+
+            // read back any created output buffers
+            const results = {};
+            for (const cb of createdBuffers) {
+                // assume size tracked; if missing try to derive from buffer.size (not standard), skip if unknown
+                const size = cb.size || 0;
+                if (!size) continue;
+                try {
+                    const data = await host.gpu.readBuffer(device, cb.buffer, size);
+                    results[cb.name] = data;
+                } catch (e) {
+                    // ignore read errors
+                }
+            }
+
+            return results;
+        }
+    }
 
 
     return host;

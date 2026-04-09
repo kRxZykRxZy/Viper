@@ -1,0 +1,23 @@
+// Example: GPU-accelerated matrix multiply using std/torch and the WGSL shader
+use { torch }
+
+async function main():
+    const A = [[1.0,2.0,3.0],[4.0,5.0,6.0]]
+    const B = [[7.0,8.0],[9.0,10.0],[11.0,12.0]]
+    // read shader from examples/shaders/matmul.wgsl
+    const shader = await host.io.read('examples/shaders/matmul.wgsl')
+    // run GPU matmul; torch.matmul will flatten arrays and upload to GPU
+    const opts = { gpu: true, shader: shader, workgroupsX: 1, workgroupsY: 1 }
+    const resultFlat = await torch.matmul(A, B, opts)
+    // resultFlat is a Float32Array (flattened row-major)
+    host.console.log('GPU matmul flat result:', resultFlat)
+    // convert to 2x2 matrix for display
+    const M = 2, N = 2
+    const mat = []
+    for (let i=0;i<M;i++):
+        const row = []
+        for (let j=0;j<N;j++): row.push(resultFlat[i*N + j])
+        mat.push(row)
+    host.console.log('GPU matmul matrix:', mat)
+
+await main()

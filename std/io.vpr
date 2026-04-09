@@ -1,4 +1,3 @@
-// pure VPR std io module delegating to host.io and host.console
 export function print(x): return host.console.log(x)
 export function input(promptText): return host.io.input(promptText)
 

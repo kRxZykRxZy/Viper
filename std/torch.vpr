@@ -1,0 +1,253 @@
+// Lightweight PyTorch-like std module for Viper (forward-only + numeric SGD)
+// Not a full autodiff engine — uses numeric gradients for training (slow but simple).
+
+// prefer gpu helpers when available
+use { gpu }
+
+// create a tensor (identity wrapper)
+export function tensor(arr):
+    return arr
+
+// create zeros with given shape (1D or 2D)
+export function zeros(shape):
+    if (typeof shape == 'number'):
+        return Array(shape).fill(0)
+    if (shape.length == 1):
+        return Array(shape[0]).fill(0)
+    // 2D
+    const out = []
+    for (let i=0; i<shape[0]; i++): out.push(Array(shape[1]).fill(0))
+    return out
+
+// simple randn using Box-Muller
+function randn1():
+    let u=0,v=0
+    while(u===0) u = host.math.random()
+    while(v===0) v = host.math.random()
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v)
+
+export function randn(shape, scale=1.0):
+    if (typeof shape == 'number'):
+        const a = []
+        for (let i=0;i<shape;i++): a.push(randn1()*scale)
+        return a
+    if (shape.length == 1):
+        const a = []
+        for (let i=0;i<shape[0];i++): a.push(randn1()*scale)
+        return a
+    const out = []
+    for (let i=0;i<shape[0];i++):
+        const row = []
+        for (let j=0;j<shape[1];j++): row.push(randn1()*scale)
+        out.push(row)
+    return out
+
+// matrix multiply: attempts host.ml.matmul then falls back to JS
+export async function matmul(a,b, opts = {}):
+    // CPU fallback or host-ml accelerated
+    if (!opts.gpu) {
+        if (host.ml && host.ml.matmul) return host.ml.matmul(a,b)
+        const r = []
+        for (let i=0;i<a.length;i++):
+            const row = []
+            for (let j=0;j<b[0].length;j++):
+                let s = 0
+                for (let k=0;k<a[0].length;k++): s += a[i][k]*b[k][j]
+                row.push(s)
+            r.push(row)
+        return r
+    }
+    // GPU path: if gpu.run available, user can supply a WGSL shader via opts.shader
+    if (gpu && gpu.run) {
+        if (!opts.shader) throw new Error('GPU matmul requires opts.shader with WGSL compute shader');
+        // prepare flat Float32Array inputs
+        const flatA = (Array.isArray(a[0]) ? new Float32Array([].concat(...a)) : new Float32Array(a));
+        const flatB = (Array.isArray(b[0]) ? new Float32Array([].concat(...b)) : new Float32Array(b));
+        const outSize = (a.length || 1) * (b[0] ? b[0].length : 1);
+        const outBuf = new Float32Array(outSize);
+        const res = await gpu.run(opts.shader, { A: flatA, B: flatB }, { C: outBuf }, { device: opts.device, workgroupsX: opts.workgroupsX, workgroupsY: opts.workgroupsY, workgroupsZ: opts.workgroupsZ, entryPoint: opts.entryPoint });
+        const cbytes = res && res.C ? res.C : null
+        if (!cbytes) return outBuf
+        return new Float32Array(cbytes.buffer || cbytes)
+    }
+    // fallback
+    if (host.ml && host.ml.matmul) return host.ml.matmul(a,b)
+    // same CPU multiply as above
+    const r2 = []
+    for (let i=0;i<a.length;i++):
+        const row2 = []
+        for (let j=0;j<b[0].length;j++):
+            let s2 = 0
+            for (let k=0;k<a[0].length;k++): s2 += a[i][k]*b[k][j]
+            row2.push(s2)
+        r2.push(row2)
+    return r2
+
+export async function add(a,b, opts = {}):
+    // elementwise add; if GPU available and requested, attempt to run a compute shader provided in opts.shader
+    if (opts.gpu && gpu && gpu.run) {
+        const flatA = Array.isArray(a[0]) ? new Float32Array([].concat(...a)) : new Float32Array(a)
+        const flatB = Array.isArray(b[0]) ? new Float32Array([].concat(...b)) : new Float32Array(b)
+        const out = new Float32Array(flatA.length)
+        const res = await gpu.run(opts.shader || "", { A: flatA, B: flatB }, { C: out }, { device: opts.device, workgroupsX: opts.workgroupsX || Math.ceil(flatA.length/64), entryPoint: opts.entryPoint || 'main' })
+        const cbytes = res && res.C ? res.C : null
+        if (!cbytes) return out
+        return new Float32Array(cbytes.buffer || cbytes)
+    }
+    // CPU path
+    if (Array.isArray(a[0])):
+        const out = []
+        for (let i=0;i<a.length;i++):
+            const row = []
+            for (let j=0;j<a[0].length;j++): row.push(a[i][j]+b[i][j])
+            out.push(row)
+        return out
+    else:
+        const out = []
+        for (let i=0;i<a.length;i++): out.push(a[i]+b[i])
+        return out
+
+export async function relu(x, opts = {}):
+    // If gpu available but no shader provided, fall back to CPU; GPU path requires shader in opts
+    if (opts.gpu && gpu && gpu.run) {
+        const flat = Array.isArray(x[0]) ? new Float32Array([].concat(...x)) : new Float32Array(x)
+        const out = new Float32Array(flat.length)
+        // user must provide shader for relu or rely on CPU
+        if (!opts.shader) {
+            // fallback to CPU
+        } else {
+            return (await gpu.run(opts.shader, { A: flat }, { C: out }, { device: opts.device, workgroupsX: opts.workgroupsX || Math.ceil(flat.length/64), entryPoint: opts.entryPoint || 'main' })).C
+        }
+    }
+    if (Array.isArray(x[0])):
+        return x.map(r => r.map(v => v>0? v:0))
+    return x.map(v => v>0? v:0)
+
+// GPU convenience helpers
+export function isGPUSupported():
+    return (typeof gpu !== 'undefined' && gpu && gpu.isSupported) ? gpu.isSupported() : false
+
+export function toGPU(device, arr):
+    if (!gpu || !gpu.createBuffer) throw new Error('GPU createBuffer not available')
+    return gpu.createBuffer(device, Array.isArray(arr[0]) ? new Float32Array([].concat(...arr)) : new Float32Array(arr))
+
+export async function fromGPU(device, buffer, size):
+    if (!gpu || !gpu.readBuffer) throw new Error('GPU readBuffer not available')
+    const res = await gpu.readBuffer(device, buffer, size)
+    return new Float32Array(res.buffer || res)
+
+export function softmax(vec):
+    const ex = vec.map(Math.exp)
+    const s = ex.reduce((a,b)=>a+b,0)
+    return ex.map(v=>v/s)
+
+// Linear layer factory: returns layer object {weights, bias, forward}
+export function Linear(inDim, outDim, opts={}):
+    const w = randn([outDim, inDim], opts.initScale || (1/Math.sqrt(inDim)))
+    const b = zeros(outDim)
+    const layer = {}
+    layer.weights = w
+    layer.bias = b
+    layer.forward = (input) => {
+        // input: 1D vector or batch (2D)
+        const inp2d = Array.isArray(input[0]) ? input : [input]
+        const out = []
+        for (let i=0;i<inp2d.length;i++):
+            const row = []
+            for (let r=0;r<w.length;r++):
+                let s = 0
+                for (let c=0;c<w[0].length;c++): s += w[r][c]*inp2d[i][c]
+                row.push(s + b[r])
+            out.push(row)
+        return Array.isArray(input[0]) ? out : out[0]
+    }
+    return layer
+
+// Sequential model
+export function Sequential(layers):
+    const m = {}
+    m.layers = layers
+    m.forward = (x) => {
+        let v = x
+        for (let i=0;i<layers.length;i++): v = layers[i].forward(v)
+        return v
+    }
+    m.parameters = () => {
+        const params = []
+        for (let i=0;i<layers.length;i++):
+            const L = layers[i]
+            if (L.weights) params.push({layer:i, name:'weights', ref:L.weights})
+            if (L.bias) params.push({layer:i, name:'bias', ref:L.bias})
+        return params
+    }
+    return m
+
+// Losses
+export function mse_loss(pred, target):
+    if (!Array.isArray(pred[0])):
+        const s = pred.reduce((a,b,i)=>a + (b-target[i])**2, 0)
+        return s / pred.length
+    // batch
+    let tot = 0
+    for (let i=0;i<pred.length;i++):
+        tot += mse_loss(pred[i], target[i])
+    return tot / pred.length
+
+export function cross_entropy(logits, labelIndex):
+    const probs = softmax(logits)
+    return -Math.log(probs[labelIndex] || 1e-12)
+
+// Numeric gradient helper (very slow) - computes gradient for a single scalar-loss function w.r.t a parameter array
+function numeric_grad_param(fnLoss, param, eps=1e-3):
+    // param may be 1D or 2D
+    if (Array.isArray(param[0])):
+        const grad = []
+        for (let i=0;i<param.length;i++):
+            const rowGrad = []
+            for (let j=0;j<param[0].length;j++):
+                const orig = param[i][j]
+                param[i][j] = orig + eps
+                const l1 = fnLoss()
+                param[i][j] = orig - eps
+                const l2 = fnLoss()
+                param[i][j] = orig
+                rowGrad.push((l1 - l2) / (2*eps))
+            grad.push(rowGrad)
+        return grad
+    else:
+        const grad = []
+        for (let i=0;i<param.length;i++):
+            const orig = param[i]
+            param[i] = orig + eps
+            const l1 = fnLoss()
+            param[i] = orig - eps
+            const l2 = fnLoss()
+            param[i] = orig
+            grad.push((l1 - l2) / (2*eps))
+        return grad
+
+// apply gradient in-place: param -= lr * grad
+function apply_grad(param, grad, lr):
+    if (Array.isArray(param[0])):
+        for (let i=0;i<param.length;i++):
+            for (let j=0;j<param[0].length;j++): param[i][j] -= lr * grad[i][j]
+    else:
+        for (let i=0;i<param.length;i++): param[i] -= lr * grad[i]
+
+// Single SGD step using numeric gradients for a single input-target pair
+export function sgd_step(model, input, target, lr=0.01, lossFn = 'mse'):
+    const lossFunction = () => {
+        const pred = model.forward(input)
+        if (lossFn == 'mse') return mse_loss(pred, target)
+        if (lossFn == 'cross') return cross_entropy(pred, target)
+        return mse_loss(pred, target)
+    }
+
+    const params = model.parameters()
+    for (let p=0;p<params.length;p++):
+        const entry = params[p]
+        const paramRef = entry.ref
+        const g = numeric_grad_param(lossFunction, paramRef)
+        apply_grad(paramRef, g, lr)
+    return lossFunction()
+

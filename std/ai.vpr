@@ -1,4 +1,3 @@
-// pure VPR AI module that delegates to host.ai backend if present
 export function backend(name, url):
     // return a simple object with run and run_model delegating to host.ai
     declare dict client

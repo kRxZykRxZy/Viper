@@ -1,0 +1,27 @@
+// Module for GPU use and GPU acceleration helpers.
+// Lightweight wrappers that delegate to `host.gpu` when available.
+
+export function isSupported():
+	return host.gpu && host.gpu.isSupported ? host.gpu.isSupported() : false
+
+export function requestDevice():
+	if (!host.gpu || !host.gpu.requestDevice) throw new Error('host.gpu.requestDevice not available')
+	return host.gpu.requestDevice()
+
+export function createBuffer(device, data):
+	if (!host.gpu || !host.gpu.createBuffer) throw new Error('host.gpu.createBuffer not available')
+	return host.gpu.createBuffer(device, data)
+
+export function readBuffer(device, buffer, size):
+	if (!host.gpu || !host.gpu.readBuffer) throw new Error('host.gpu.readBuffer not available')
+	return host.gpu.readBuffer(device, buffer, size)
+
+export function compute(shaderCode, inputs, outputs, opts):
+	if (!host.gpu || !host.gpu.run) throw new Error('host.gpu.run not available')
+	return host.gpu.run(shaderCode, inputs, outputs, opts)
+
+// Example helper: alloc typed array into a GPU buffer
+export function allocArray(device, arr):
+	return createBuffer(device, arr)
+
+// End of GPU std module
