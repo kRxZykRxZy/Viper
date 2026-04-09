@@ -1,0 +1,21 @@
+use { http, fetch }
+
+// Example starting a simple HTTP server and demonstrating proxying with `fetch`.
+export fn start_example_server() {
+  const server = http.serve({ port: 8080 }, async (req) => {
+    // simple path-based behavior
+    if (req.method == 'GET' && req.url.endsWith('/proxy')) {
+      try {
+        const p = await fetch('https://httpbin.org/get');
+        const txt = await p.text();
+        return { status: 200, headers: { 'content-type': 'application/json' }, body: txt };
+      } catch (e) {
+        return { status: 502, body: 'proxy error' };
+      }
+    }
+    return { status: 200, body: 'hello from viper http_example' };
+  });
+
+  console.log('server started at', server.url);
+  return server;
+}

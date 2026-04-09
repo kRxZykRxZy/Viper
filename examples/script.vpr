@@ -1,0 +1,23 @@
+use "std/math.vpr"
+use "std/io.vpr"
+use "std/ml.vpr"
+use "std/ai.vpr"
+
+x = math.sin(math.PI / 2)   # 1
+y = math.factorial(5)       # 120
+z = math.sqrt(49)           # 7
+
+io.print("Hello, Viper!")
+name = io.input("Enter your name: ")
+io.print("Hi", name)
+
+a = ml.tensor([1,2,3])
+b = ml.tensor([4,5,6])
+c = ml.add(a, b)
+d = ml.softmax(c)
+e = ml.relu([-2,3,-1,5])
+
+# AI example (simulated)
+client = ai.backend("ollama", "http://localhost:3000")
+result = await client.run("Write a Viper function to add two numbers")
+io.print(result)

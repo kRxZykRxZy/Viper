@@ -1,0 +1,15 @@
+use { fetch }
+
+// Example showing how to `use { fetch }` and await a response
+export async fn fetch_example() {
+  try {
+    const res = await fetch('https://httpbin.org/get');
+    console.log('status', res.status);
+    const j = await res.json();
+    console.log('response url:', j.url);
+    return j;
+  } catch (e) {
+    console.log('fetch error', e.message);
+    return null;
+  }
+}

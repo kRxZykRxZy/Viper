@@ -1,0 +1,6 @@
+// pure VPR ml module delegating to host.ml where needed
+export function tensor(arr): return arr
+export function add(a, b): return host.ml && host.ml.add ? host.ml.add(a, b) : a
+export function softmax(arr): return host.ml && host.ml.softmax ? host.ml.softmax(arr) : arr
+export function relu(arr): return host.ml && host.ml.relu ? host.ml.relu(arr) : arr
+

@@ -1,0 +1,8 @@
+// pure VPR std math module delegating to host.math
+export function sin(x): return host.math.sin(x)
+export function sqrt(x): return host.math.sqrt(x)
+export function factorial(n): return host.math.factorial(n)
+
+export PI = host.math.PI
+# std math (virtual) - placeholder file for reference
+# This file is intentionally a placeholder. The interpreter provides std/math.vpr builtin functions.

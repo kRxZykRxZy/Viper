@@ -1,0 +1,13 @@
+use { ffi }
+
+// Example: call a native add function from a shared lib
+export fn use_native() {
+  const lib = ffi.load('./libmylib.so', {
+    add_int32: { parameters: ['i32','i32'], result: 'i32' }
+  });
+
+  const result = lib.add_int32(10, 24);
+  console.log('native add result', result);
+  lib.close();
+  return result;
+}
